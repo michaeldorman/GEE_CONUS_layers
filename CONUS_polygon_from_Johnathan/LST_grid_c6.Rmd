@@ -1,0 +1,342 @@
+---
+title: "LST Grid C6"
+output:
+  html_document:
+    toc: true
+    toc_depth: 2
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(results='hold')
+#knitr::opts_chunk$set(cache = TRUE)
+#knitr::opts_chunk$set(cache.path = "/home/rushj03/dev/docs/cache/")
+```
+
+```{r libraries, message=FALSE, cache=FALSE}
+library(rnaturalearth)
+library(raster)
+library(rgdal)
+library(sp)
+library(rgeos)
+library(data.table)
+library(fst)
+library(mapview)
+library(leaflet)
+#library(gdalUtils)
+```
+
+We will handle the selection of LST cells within the CONUS (+ buffer) using raster overlay.  
+
+# CONUS boundaries
+
+Download the countries and lakes shapefiles from Natural Earth. Only needs to be run once.  
+```{r download_natural_earth, eval=FALSE}
+ne_download(scale = 10, type = "countries", category = "cultural", destdir = "/data-belle/naturalearth/", load = FALSE)
+ne_download(scale = 10, type = "lakes", category = "physical", destdir = "/data-belle/naturalearth/", load = FALSE) 
+```
+
+Load the lakes and countries at 1:10k scale
+```{r get_polygons}
+lakesSP = ne_load(scale = 10, type = "lakes", category = "physical", destdir = "/data-belle/naturalearth/")
+countriesSP = ne_load(scale = 10, type = "countries", category = "cultural", destdir = "/data-belle/naturalearth/")
+```
+
+Select USA
+```{r get_usa}
+usaSP = countriesSP[countriesSP$NAME == 'United States of America', "NAME"]
+```
+
+Clip USA to CONUS
+```{r clip_conusSP, warning=FALSE}
+clipmatrix = as.matrix(extent(usaSP))      # quick way to get a matrix with the right row/col names and dimensions
+clipmatrix[] <- c(-126, 24.4, -66.7, 49.4) # actual coordinates of the CONUS bbox
+clipmatrix                                 # check the matrix
+clip_poly <- as(extent(as.vector(t(clipmatrix))), "SpatialPolygons") # CRS isn't set, but that's OK in this case
+conusSP = gIntersection(usaSP, clip_poly, byid = TRUE)               # ignore the warning about different CRS
+
+# remove some objects
+rm(countriesSP, usaSP)
+
+plot(conusSP, axes = TRUE)
+```
+
+## Buffer CONUS
+We'll use a small buffer of 2km. It's intended to allow for registration differences between the MODIS data and the boundary data.  
+```{r buffer_conus}
+# First we reproject to Albers Equal Area so we can get better buffers
+conus_naea = spTransform(conusSP, "+proj=laea +lat_0=45 +lon_0=-100 +x_0=0 +y_0=0 +a=6370997 +b=6370997 +units=m +no_defs")
+conus_naea_buff = buffer(conus_naea, width = 2000, dissolve = TRUE)
+rm(conus_naea)
+plot(conus_naea_buff, axes = TRUE)
+```
+
+## Cut Great lakes from CONUS shape
+
+We remove the Great Lakes since the MODIS QC Flag notion of the water mask only includes oceans. 
+```{r cut_greatlakes}
+greatlakesSP = lakesSP[which(lakesSP$name_alt == 'Great Lakes'), ]
+greatlakes_naea = spTransform(greatlakesSP, "+proj=laea +lat_0=45 +lon_0=-100 +x_0=0 +y_0=0 +a=6370997 +b=6370997 +units=m +no_defs")
+conus_GLakes_naea_buff = gDifference(conus_naea_buff, greatlakes_naea)
+rm(lakesSP, greatlakesSP, conus_naea_buff)
+plot(conus_GLakes_naea_buff, axes = TRUE)
+```
+
+As a result of buffering into Canada and then removing the Great Lakes, there is sometimes a bit of polygon left on the other side of the Great Lakes. It looks funny, but it is consistent with the goal of including some adjacent land in Canada and Mexico to support focal functions.  
+
+```{r mapview_buffalo}
+mv1 = mapview(conus_GLakes_naea_buff, col.regions = "orange", color = "red") + mapview(greatlakes_naea, col.regions = "blue", color = "white")
+setView(mv1@map, -79, 43, 10) # see region around Buffalo
+```
+
+## Question: should we remove any other water?
+
+We should review whether we are satisfied with the shapes of the Great Lakes used to remove potential LST points, but we've accepted that the Great Lakes *should* be removed.  
+  
+Should any other large water bodies be removed?
+
+### Potential Datasets
+
+On 10/23/2018, we discussed some datasets that could be used:  
+  
+- MODIS water mask  
+    - We've only looked at it briefly. It has the advantage of coming from the same data supplier, but we haven't checked if it's one of the LST or MAIAC inputs.  
+    - It looked good in some areas, but seemed to include intermittent water features. Removing data over intermittent features would be OK if:  
+        1. nobody lives in those areas  
+        2. the potential presence of water would disrupt the model  
+        3. ignoring this small amount of LST data doesn't negatively impact the model  
+- LU/LC dataset like NLCD  
+    - This seems to Johnathan to be most consistent with previous approaches. It is, after all, land cover we're talking about.  
+- NDVI low values  
+    - We haven't examined this thoroughly.  
+- Rasterized National Hydrography Dataset (NHD)  
+    - We haven't examined this thoroughly.  
+- SRTM water bodies  
+    - We haven't examined this thoroughly.  
+
+### Potential Water Removal Methods
+
+- Majority of the area of LST cell covered by water as defined by chosen datset  
+    - Possible for all but the MODIS water mask dataset  
+    - First, convert the water dataset to a mask (binary raster)  
+    - Then aggregate the higher-resolution data to the LST grid with `mean` function. Cells with values >0.5 are classified as water at 1km  
+- Centroid of LST cell covered by water as defined by chosen datset  
+
+**For now, we move on with only the Great Lakes removed.**  
+
+# Open C6 LST files
+
+We're using MOD11A1 (Terra LST) below.  
+
+```{r modis_input_parameters}
+# for terra
+input_path = "/data-belle/LST/MODIS.LST.C6/HDF/MOLT/MOD11A1.006/"
+# we have 2000.02.24 through 2018.05.13 as of now, but any day *should* be the same for getting water from the QC fields
+this_date = "2000.02.26"
+
+files022600 = list.files(paste0(input_path, this_date), pattern = "hdf$", full.names = TRUE)
+```
+
+RGDAL needs the path to an HDF file prefixed with its type, and postfixed with the layer name.  
+
+Example path to HDF subdataset, including parent directory:  
+`HDF4_EOS:EOS_GRID:"2001.02.03/MOD11A1.A2001034.h08v04.006.2015113000453.hdf":MODIS_Grid_Daily_1km_LST:QC_Day`  
+Example path to HDF subdataset, including full path (what we calculate below):  
+`HDF4_EOS:EOS_GRID:\"/data-belle/LST/MODIS.LST.C6/HDF/MOLT/MOD11A1.006/2001.02.03/MOD11A1.A2001034.h08v04.006.2015113000453.hdf\":MODIS_Grid_Daily_1km_LST:QC_Day`  
+```{r hdf_paths}
+filesHDF = paste0('HDF4_EOS:EOS_GRID:"', files022600, '":MODIS_Grid_Daily_1km_LST:QC_Day')
+```
+
+## Load HDFs as Rasters and Mosaic
+
+```{r open_modis, message=FALSE, cache=FALSE}
+openfiles = lapply(filesHDF, readGDAL)
+rasters = lapply(openfiles, raster)
+
+# this weird format courtesy of raster::mosaic help, allows mosaicing a list of rasters
+names(rasters)[1:2] <- c('x', 'y')
+rasters$fun <- min
+rasters$na.rm <- TRUE
+mosaic_qclayer = do.call(mosaic, rasters)
+
+rm(openfiles, rasters)
+mosaic_qclayer
+```
+
+Preview the mosaiced QC layer  
+```{r mapview_mosaic}
+mapview(mosaic_qclayer, method = "ngb")
+```
+
+# LST to land/water mask
+
+Convert the QC values to a binary mask: 1 for land, 0 for water
+```{r reclassify_to_mask}
+# make a reclassification matrix for all possible QC values within the range
+reclassmtx = as.matrix(data.frame(from = c(-Inf, 2, 3), to = c(2, 3, Inf), becomes = c(1,0,1)))
+lwmask_c6_qc = reclassify(mosaic_qclayer, reclassmtx)
+lwmask_c6_qc
+plot(lwmask_c6_qc, axes = TRUE)
+```
+
+Ensuring the raster mask is made of integer values also reduces its RAM usage:  
+```{r mask_data_size}
+paste("size of land-water mask raster:", format(object.size(lwmask_c6_qc), "auto"))
+lwmask_c6_qc[] = as.integer(lwmask_c6_qc[]) # half the size after coercing values to integers
+paste("size of land-water mask raster as integer:", format(object.size(lwmask_c6_qc), "auto"))
+```
+
+Preview the land/water mask made from LST QC values:  
+```{r mapview_mask}
+mapview(lwmask_c6_qc, method = "ngb")
+```
+
+
+## Rasterize the buffered CONUS polygon
+
+Reproject to match the LST data
+```{r reproject_conus}
+conus_GLakes_sinu_buff = spTransform(conus_GLakes_naea_buff, proj4string(lwmask_c6_qc))
+conus_GLakes_sinu_buff
+```
+
+Rasterize while using lwmask as mask and grid registration
+```{r rasterize_conus}
+conus_ras = rasterize(conus_GLakes_sinu_buff, lwmask_c6_qc, mask = TRUE)
+conus_ras
+rm(conus_GLakes_sinu_buff, lwmask_c6_qc)
+plot(conus_ras, axes = TRUE)
+```
+
+We could trim the extent down to match the CONUS, but we haven't, yet.  
+The point version below does not include points outside of CONUS.  
+
+### Save a copy of the raster land/water mask
+```{r write_raster}
+# LOG1S would be preferable, but we'd get message that data type "LOG" is not available in GDAL
+writeRaster(conus_ras, "/data-belle/LST/MODIS.LST.C6/derived/lst_land_glakes_conus_2kmbuff.tif", 
+            format = "GTiff", datatype = 'INT1U', overwrite = TRUE)
+```
+
+## Raster to Points
+```{r raster_topoints}
+system.time(spdf_conus_lst <- rasterToPoints(conus_ras, spatial = TRUE, fun=function(x){x==1}))  # 7-14secs
+cat(paste("SPDF points version of LST conus raster is", format(object.size(spdf_conus_lst), "auto"), "in memory\n"))  # 208 Mb
+```
+9,068,851 poins with value 1. SPDF only has poinst on land, due to selection function in rasterToPoints.  
+
+### Sinusoidal coordinates as data.table
+
+```{r sinu_DT}
+# get coords
+conus_lst_coords = spdf_conus_lst@coords
+
+# make data.table
+conus_lst_DT = data.table(conus_lst_coords)
+
+as.matrix(head(conus_lst_DT))
+```
+
+### WGS84 coordinates as data.table
+
+```{r wgs84_DT}
+# reproject to wgs84
+wgs84string = "+proj=longlat +datum=WGS84 +no_defs +ellps=WGS84 +towgs84=0,0,0" # used by Natural Earth data
+spdf_conus_lst_wgs84 = spTransform(spdf_conus_lst, wgs84string) 
+cat("proj4string used to reproject LST to WGS84:\n")
+cat("  ", paste0(wgs84string, "\n"))
+
+# get coords
+conus_lst_coords = spdf_conus_lst_wgs84@coords
+
+# make data.table
+conus_lst_DT_wgs84 = data.table(conus_lst_coords)
+
+as.matrix(head(conus_lst_DT_wgs84))
+```
+
+### Join coordinates
+
+```{r}
+setnames(conus_lst_DT, c("x", "y"), c("x_sinu", "y_sinu"))
+conus_lst_DT[, `:=`(x_wgs84 = conus_lst_DT_wgs84$x, y_wgs84 = conus_lst_DT_wgs84$y)]
+rm(conus_lst_DT_wgs84)
+as.matrix(head(conus_lst_DT))
+```
+
+### Pairing Function
+These pairing functions are set up to make all coordinates positive for the Sinusoidal MODIS CRS
+```{r pair_functions_sinu_m}
+# Calculate numeric LST ids for with pairing function
+pair<-function(x,y){ 0.5*(x+y)*(x+y+1) +  x }       # pairing function expects positive integers
+prepLonSinuM <- function(x){trunc(x+20015110)}      # longitude m, +20015110 makes always positive, as integers
+prepLatSinuM <- function(y){trunc(y+10007556)}      # latitude m,  +10007556 makes always positive, as integers
+
+# generic version allowing variable precision, simplified above because we don't need submeter precision
+# pair_prec = 0                                            # precision is set to zero decimal places
+# prepLon <- function(x){trunc((x+20015110)*10^pair_prec)} # longitude m, +20015110 makes always positive, as integers
+# prepLat <- function(y){trunc((y+10007556)*10^pair_prec)} # latitude m,  +10007556 makes always positive, as integers
+```
+
+```{r add_pairid}
+conus_lst_DT[, idLSTpair0 := pair(prepLonSinuM(x_sinu), prepLatSinuM(y_sinu))]
+setcolorder(conus_lst_DT, c("idLSTpair0"))
+cat(paste("Size of coordinate data.table:", format(object.size(conus_lst_DT), "auto"), "\n"))
+as.matrix(head(conus_lst_DT))
+```
+
+We are still within the precision limits for R numerics (double-precision floating points) at e+14. 4e+15 is the [limit of whole number precision](https://en.wikipedia.org/wiki/Double-precision_floating-point_format#IEEE_754_double-precision_binary_floating-point_format:_binary64).   
+
+#### Reversing the Pairing Function
+
+The unpaired numbers can be up to one meter different than the original coordinates. However, the IDs generated by the pairing function are intended to be unique, and the fact that they are (mostly) reversible is just a bonus. We plan on keeping the original coordinates, at least in the table we're exporting below, in case we need to join them in later.  
+
+```{r unpair_test_sinu}
+unpair<-function(z){
+  w= floor( (sqrt(8*z+1) - 1)/2 )
+  t = w*(w+1)/2
+  cbind(z-t-20015110,w-z+t-10007556)
+}
+unpaired_sinu = unpair(conus_lst_DT[, idLSTpair0])
+
+unpair_xdiff = unpaired_sinu[,1] - conus_lst_DT[, x_sinu]
+unpair_ydiff = unpaired_sinu[,2] - conus_lst_DT[, y_sinu]
+paste("maximum difference in unpaired X:", round(max(abs(unpair_xdiff)),6), "meters")
+paste("maximum difference in unpaired Y:", round(max(abs(unpair_ydiff)),6), "meters")
+rm(unpaired_sinu, unpair_xdiff, unpair_ydiff)
+```
+
+# Output
+
+Save these LST CONUS land points to disk as an FST  
+```{r save_dt}
+out_fst = "/data-belle/LST/MODIS.LST.C6/derived/conus_lst_land_glakes_2km.fst"
+system.time(write_fst(conus_lst_DT, out_fst, compress = 100))
+cat(paste("Size of output FST:", round(file.size(out_fst)/1024^2,0), "MB\n"))
+```
+
+## Shapefile Version
+
+Bind WGS84 coordinates and idLSTpair0 to the sinusoidal SPDF   
+```{r join_columns_spdf}
+bindcolsDF = conus_lst_DT[, .(idLSTpair0, x_wgs84, y_wgs84)]
+row.names(bindcolsDF) <- row.names(spdf_conus_lst)
+spdf_conus_lst = maptools::spCbind(spdf_conus_lst, bindcolsDF)
+spdf_conus_lst = spdf_conus_lst[, 2:4] # remove layer column that had 1 for every row
+rm(bindcolsDF)
+spdf_conus_lst
+```
+
+Save the SPDF as a shapefile  
+```{r save_shp}
+system.time(writeOGR(spdf_conus_lst, layer = "conus_lst_land_glakes_2km", dsn = "/data-belle/LST/MODIS.LST.C6/derived/", driver="ESRI Shapefile", overwrite_layer = TRUE))
+
+# Get size of shapefile files
+shp_files = list.files("/data-belle/LST/MODIS.LST.C6/derived/", pattern = "conus_lst_land_glakes_2km.*", full.names = TRUE)
+shp_files = shp_files[-(grep("fst", shp_files))] # remove fst from matched files
+shp_size = sum(unlist(lapply(shp_files, file.size)))
+cat(paste("Size of output Shapefile:", round(shp_size/1024^2,0), "MB\n"))
+```
+
+
+

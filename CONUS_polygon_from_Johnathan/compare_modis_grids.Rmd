@@ -1,0 +1,168 @@
+---
+title: "Compare MODIS Grids"
+author: "Johnathan Rush"
+date: "11/6/2018"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(results='hold')
+knitr::opts_chunk$set(cache = TRUE)
+knitr::opts_chunk$set(cache.path = "/home/rushj03/dev/docs/cache/")
+```
+
+This document compares three MODIS products we're interested in using and tests whether their coordinate system, resolution, and registration are the same.  
+
+# Libraries
+
+```{r libraries, message=FALSE}
+library(raster)
+library(rgdal)
+library(sp)
+library(gdalUtils)
+```
+
+# Daily MAIAC: MCD19A2
+
+MAIAC from NASA DAAC  
+
+We have a four files downloaded for a test region in NEMIA: two tiles for two days.  
+We'll use day 292, which is 10-19-2015, and tile h11v05. We'll select matching tiles for the other datasets.    
+
+```{r mcd19}
+cat("MCD19A2 available files:\n")
+list.files("~/qnap_geo/MCD19A2/", pattern = ".*hdf$")
+cat("\nSelected MCD19A2 file:\n")
+list.files("~/qnap_geo/MCD19A2/", pattern = "MCD19A2.A2015292.h11v05.*hdf$")
+mcd19file = list.files("~/qnap_geo/MCD19A2/", pattern = "MCD19A2.A2015292.h11v05.*hdf$", full.names = TRUE)
+```
+
+# Daily LST: MOD11A1 (Terra)
+
+Collection 6 LST  
+
+```{r mod11_c6}
+input_path = "/data-belle/LST/MODIS.LST.C6/HDF/MOLT/MOD11A1.006/" # for terra
+this_date = "2015.10.19"
+cat("Selected MOD11A1 file:\n")
+list.files(paste0(input_path, this_date), pattern = ".*h11v05.*hdf$")
+mod11file = list.files(paste0(input_path, this_date), pattern = ".*h11v05.*hdf$", full.names = TRUE)
+```
+
+# Monthly NDVI: MOD13A3 (Terra)
+
+Collection 5 NDVI  
+
+```{r mod13}
+input_path = "/data-belle/LST/MODIS.LST.18122016/modis_lst_ndvi_2000-2016/e4ftl01.cr.usgs.gov/MODIS_Composites_NDVI/MOLT/MOD13A3.005/" # for terra
+this_date = "2015.10.01" # monthly files
+cat("Selected MOD13A3 file:\n")
+list.files(paste0(input_path, this_date), pattern = ".*h11v05.*hdf$")
+mod13file = list.files(paste0(input_path, this_date), pattern = ".*h11v05.*hdf$", full.names = TRUE)
+```
+
+# Open one tile for each
+
+```{r mod11_raster}
+h11v05_mod11A1 = raster(get_subdatasets(mod11file)[1]) # sd 1 is LST
+h11v05_mod11A1
+```
+
+```{r mcd19_raster}
+h11v05_mcd19A2 = raster(get_subdatasets(mcd19file)[1]) # sd 1 is Optical_Depth_047
+h11v05_mcd19A2
+```
+
+```{r mod13_raster}
+h11v05_mod13A3 = raster(get_subdatasets(mod13file)[1]) # sd 1 is 1_km_monthly_NDVI
+h11v05_mod13A3
+```
+
+The proj4strings are identical for all three.  
+
+# Compare Rasters
+
+The `raster::compareRaster` function allows us to compare the extent, dimensions, CRS, resolution, origin, and rotation of two different rasters. These are compared within a tolerance expressed as fractions of a grid cell. The default value is 1/10 of the grid cell size.  
+
+We'll compare each of these grid attributes while shrinking the tolerance, and report when it fails.  
+
+```{r gridComp_function}
+# assumes meters, which is correct for the MODIS CRS
+gridComp <- function(grid1, grid2){
+  for(i in 1:9){
+    rasterOptions(tolerance = 1*10^(-i))
+    comp = compareRaster(grid1, grid2, res = T, orig = T, stopiffalse = F, showwarning = T)
+    if(comp == FALSE) break
+  }
+  if(i > 1){
+    #cat(paste0("\nRasters were the same at the 1e-", i-1, " level, but not at the 1e-", i, " level\n"))
+    cat(paste0("\nRasters were the same within a tolerance of ", 
+               format(1*10^(-i+1)*res(grid1)[[1]],scientific = T, digits = 3), 
+               " meters, but not within ", 
+               format(1*10^(-i)*res(grid1)[[1]],scientific = T, digits = 3), " meters\n"))
+  }else{
+    cat(paste0("Rasters were not the within a tolerance of ", 
+               format(1*10^(-i)*res(grid1)[[1]],scientific = T, digits = 3), " meters\n"))
+  }
+}
+```
+
+## Compare MOD11A1 to MCD19
+
+Terra Daily LST collection 6 vs. MAIAC Daily  
+
+```{r compare_lst_maiac}
+gridComp(h11v05_mod11A1, h11v05_mcd19A2)
+```
+
+## Compare MOD11A1 to MOD13A3
+
+Terra Daily LST **collection 6** vs. Terra Monthly NDVI **collection 5**  
+
+We didn't have any collection 6 NDVI downloaded for this region.  
+
+```{r compare_lst_ndvi}
+gridComp(h11v05_mod11A1, h11v05_mod13A3)
+```
+
+# Summary
+
+These grids have *functionally identical* registrations and resolutions, and *identical* CRS and dimensions.  
+
+## Centroid point distance
+
+We can go even farther and check the distance between the corresponding centroids of two different rasters.  
+
+First, we'll reassign the values to all 0 or 1. 1 will be used sparingly, and only those cells will be selected when converting to points.  
+
+```{r raster_binary_vector}
+# build vector of new values
+newv = rep.int(0, ncell(h11v05_mod11A1))
+skipnumber = 110
+for(i in 1:as.integer(ncell(h11v05_mod11A1)/skipnumber)){
+  newv[i*skipnumber] = 1
+}
+```
+
+Set values of rasters
+```{r reset_raster_values}
+h11v05_mcd19A2[] <- newv
+h11v05_mod11A1[] <- newv
+names(h11v05_mcd19A2) <- "mcd19"
+names(h11v05_mod11A1) <- "mod11"
+```
+
+Convert to points
+```{r raster_to_points}
+# takes about half a second each
+spdf_mcd19_h11v05 <- rasterToPoints(h11v05_mcd19A2, spatial = TRUE, fun=function(x){x==1})
+spdf_mod11_h11v05 <- rasterToPoints(h11v05_mod11A1, spatial = TRUE, fun=function(x){x==1})
+paste("Same number of points for each:", nrow(spdf_mcd19_h11v05) == nrow(spdf_mod11_h11v05))
+```
+
+```{r calculate_distance}
+distvec = pointDistance(spdf_mcd19_h11v05, spdf_mod11_h11v05, lonlat = FALSE)
+cat(paste("Range in raster centroid distances:", paste(round(range(distvec),6), collapse = " to "), "meters\n"))
+```
+
