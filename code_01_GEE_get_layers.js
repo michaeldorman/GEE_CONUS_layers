@@ -1,13 +1,17 @@
-// Data layer
+// Elevation
+//var layer = ee.Image("USGS/NED"); var layer = ee.Image("USGS/SRTMGL1_003");
+//var outLayerName = "SRTMGL1_003";
+// TO CHECK NED SIZE ERROR
+
+// Population
 //var layer = ee.Image("CIESIN/GPWv4/unwpp-adjusted-population-density/2015");
-//var layer = ee.Image("USGS/NED");
-var layer = ee.Image("USGS/SRTMGL1_003");
+//var outLayerName = "unwpp-adjusted-population-density-2015";
+
+// mTPI
+var layer = ee.Image("CSP/ERGo/1_0/US/mTPI");
+var outLayerName = "mTPI";
 
 print(layer);
-
-// Output layer name
-//var outLayerName = "unwpp-adjusted-population-density-2015";
-var outLayerName = "SRTMGL1_003";
 
 // Reducer function
 var reducer = ee.Reducer.mean();

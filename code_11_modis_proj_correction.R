@@ -7,7 +7,7 @@ library(sf)
 
 setwd("/home/michael/Dropbox/BGU/Itai_Kloog/p_56_CONUS_LST_independent_variables_from_GEE/")
 
-path = "~/Downloads/SRTMGL1_003.tif"
+path = "~/Downloads/mTPI.tif"
 
 ################################################################################
 
