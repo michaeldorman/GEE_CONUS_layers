@@ -10,13 +10,16 @@ setwd("/home/michael/Dropbox/BGU/Itai_Kloog/p_56_CONUS_LST_independent_variables
 # All other than NLCD
 # path = ""
 
-# NLCD
-path1 = "~/Downloads/NLCD2011_landcover_11_12_21_22_23_24_31_41_42_43_51_52_71_72_73_74_81_82_90_95-0000000000-0000000000.tif"
-path2 = "~/Downloads/NLCD2011_landcover_11_12_21_22_23_24_31_41_42_43_51_52_71_72_73_74_81_82_90_95-0000000000-0000005376.tif"
+# NLCD / Landforms
+# path1 = "~/Downloads/NLCD2011_landcover_11_12_21_22_23_24_31_41_42_43_51_52_71_72_73_74_81_82_90_95-0000000000-0000000000.tif"
+# path2 = "~/Downloads/NLCD2011_landcover_11_12_21_22_23_24_31_41_42_43_51_52_71_72_73_74_81_82_90_95-0000000000-0000005376.tif"
+path1 = "~/Downloads/drive-download-20190107T074456Z-001/SRTM_landforms_11_12_13_14_15_21_22_23_24_31_32_33_34_41_42-0000000000-0000000000.tif"
+path2 = "~/Downloads/drive-download-20190107T074456Z-001/SRTM_landforms_11_12_13_14_15_21_22_23_24_31_32_33_34_41_42-0000000000-0000006144.tif"
 r1 = brick(path1)
 r2 = brick(path2)
 r2 = merge(r1, r2)
-path = "~/Downloads/NLCD2011_landcover_11_12_21_22_23_24_31_41_42_43_51_52_71_72_73_74_81_82_90_95.tif"
+# path = "~/Downloads/NLCD2011_landcover_11_12_21_22_23_24_31_41_42_43_51_52_71_72_73_74_81_82_90_95.tif"
+path = "~/Downloads/SRTM_landforms_11_12_13_14_15_21_22_23_24_31_32_33_34_41_42.tif"
 writeRaster(r2, path)
 
 ################################################################################
